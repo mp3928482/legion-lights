@@ -30,7 +30,7 @@ The installer adds the command and the Walker menu to `/usr/local/bin`. It also 
 legion-lights info                     # controller attributes + report layout
 legion-lights identify                 # light each zone in turn to learn which is which
 legion-lights color purple             # solid color (names, RRGGBB or #RRGGBB)
-legion-lights color ff6000 -b 40 --lamps bar
+legion-lights color ff6000 -b 40 --lamps front_strip
 legion-lights effect wave              # rainbow rotating round each fan, phase-shifted across the case
 legion-lights effect breathe -c cyan
 legion-lights effect spin -c red       # comet with a tail chasing round each fan ring
@@ -47,13 +47,22 @@ makes the controller hitch, which shows up as uneven motion.
 
 ## Zones
 
-The defaults come from the lamp positions the controller reports: four rings of 12 (`ring1`–`ring4`),
-a 16-lamp `bar`, and 6 `extra` lamps. Run `legion-lights identify`, then give them real names in
-`~/.config/legion-lights/zones.json`:
+Checked on a Legion T5 30AGB10 by lighting each zone on its own:
+
+| Zone | Lamps | What lights up |
+|---|---|---|
+| `lower_fans` | 0–11 | lower front fans (one zone drives both) |
+| `front_strip` | 12–27 | front light strip |
+| `top_fans` | 28–39 | top fans |
+| `rear_fan` | 40–51 | rear exhaust fan |
+| `cpu_cooler` | 52–63 | CPU cooler fan |
+| `extra` | 64–69 | nothing visible (the controller reports these lamps but none light) |
+
+`legion-lights identify` lights each zone in turn. To rename or regroup zones, put your own map in
+`~/.config/legion-lights/zones.json`. It replaces the defaults:
 
 ```json
-{ "rear_fan": [0, 11], "front_bar": [12, 27], "front_fan_top": [28, 39],
-  "front_fan_mid": [40, 51], "front_fan_low": [52, 63], "logo": [64, 69] }
+{ "fans": [0, 11], "strip": [12, 27], "top": [28, 39], "rear": [40, 51], "cooler": [52, 63] }
 ```
 
 ## Protocol notes

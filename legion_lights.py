@@ -472,11 +472,12 @@ NAMED = {"red": "ff0000", "green": "00ff00", "blue": "0000ff", "white": "ffffff"
          "cyan": "00ffff", "magenta": "ff00ff", "purple": "8000ff", "pink": "ff4090",
          "orange": "ff6000", "yellow": "ffd000", "off": "000000", "black": "000000"}
 
-# Default zones, guessed from the lamp positions the controller reports (rings of 12 + a 16-lamp bar).
-# Run `legion-lights identify` to see which is which, then rename them in ~/.config/legion-lights/zones.json.
+# Default zones for the Legion T5 30AGB10, checked by lighting each one on the real case.
+# "extra" (64-69) is reported by the controller but lit nothing visible on a T5.
+# Override or rename them in ~/.config/legion-lights/zones.json.
 DEFAULT_ZONES = {
-    "ring1": [0, 11], "bar": [12, 27], "ring2": [28, 39],
-    "ring3": [40, 51], "ring4": [52, 63], "extra": [64, 69],
+    "lower_fans": [0, 11], "front_strip": [12, 27], "top_fans": [28, 39],
+    "rear_fan": [40, 51], "cpu_cooler": [52, 63], "extra": [64, 69],
 }
 
 
@@ -866,7 +867,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def lamps_arg(sp):
-        sp.add_argument("--lamps", help="zones and/or ranges, e.g. 'ring1,bar' or '0-11,64-69' (default: all)")
+        sp.add_argument("--lamps", help="zones and/or ranges, e.g. 'top_fans,front_strip' or '0-11,40-51' (default: all)")
 
     sub.add_parser("list", help="list LampArray devices").set_defaults(func=cmd_list)
     sub.add_parser("info", help="show controller attributes and report layout").set_defaults(func=cmd_info)
