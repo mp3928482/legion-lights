@@ -1,0 +1,13 @@
+#!/bin/sh
+# systemd-sleep hook: lights off before suspend, last state back after resume.
+# install.sh copies this to /usr/lib/systemd/system-sleep/ and fills in the user name.
+LL_USER="@USER@"
+LL_UID=$(id -u "$LL_USER") || exit 0
+run() { runuser -u "$LL_USER" -- env XDG_RUNTIME_DIR="/run/user/$LL_UID" /usr/local/bin/legion-lights "$@"; }
+
+case "$1" in
+  pre)  run off --no-save ;;
+  # The controller re-enumerates on resume; give it a moment before talking to it.
+  post) sleep 2; run restore ;;
+esac
+exit 0

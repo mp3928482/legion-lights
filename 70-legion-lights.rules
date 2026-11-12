@@ -1,0 +1,3 @@
+# Let the logged-in user open the Lenovo Legion case lighting controller (HID LampArray)
+# without root. Installed to /etc/udev/rules.d/ by install.sh.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="c955", TAG+="uaccess"

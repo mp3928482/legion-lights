@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Walker menu for legion-lights. Bind it in ~/.config/hypr/bindings.conf, e.g.:
+#   bindd = SUPER ALT, L, Case lighting, exec, legion-lights-menu
+set -euo pipefail
+
+pick() {
+  local prompt="$1"
+  if command -v walker >/dev/null; then
+    walker --dmenu -p "$prompt"
+  elif command -v fuzzel >/dev/null; then
+    fuzzel --dmenu -p "$prompt "
+  else
+    wofi --dmenu -p "$prompt"
+  fi
+}
+
+notify() { command -v notify-send >/dev/null && notify-send -a "Case lighting" "$1" || true; }
+
+choice=$(printf '%s\n' \
+  "Match theme" \
+  "Match theme (breathe)" \
+  "Solid color" \
+  "Rainbow wave" \
+  "Color cycle" \
+  "Breathe" \
+  "Spin" \
+  "Brightness" \
+  "Off" \
+  "Firmware default" | pick "Case lighting") || exit 0
+
+pick_color() {
+  printf '%s\n' white warm red orange yellow green cyan blue purple magenta pink | pick "Color (or type RRGGBB)"
+}
+
+case "$choice" in
+  "Match theme")           legion-lights theme ;;
+  "Match theme (breathe)") legion-lights theme --effect breathe ;;
+  "Solid color")           c=$(pick_color) && legion-lights color "$c" ;;
+  "Rainbow wave")          legion-lights effect wave ;;
+  "Color cycle")           legion-lights effect cycle ;;
+  "Breathe")               c=$(pick_color) && legion-lights effect breathe -c "$c" ;;
+  "Spin")                  c=$(pick_color) && legion-lights effect spin -c "$c" ;;
+  "Brightness")
+    b=$(printf '%s\n' 100 75 50 25 10 | pick "Brightness %") || exit 0
+    # Re-apply the saved state at the new brightness.
+    state="${XDG_STATE_HOME:-$HOME/.local/state}/legion-lights/state.json"
+    if [[ -f $state ]] && command -v jq >/dev/null; then
+      jq --argjson b "$b" '.brightness = ($b / 100)' "$state" > "$state.tmp" && mv "$state.tmp" "$state"
+      legion-lights restore
+    else
+      legion-lights color white -b "$b"
+    fi ;;
+  "Off")                   legion-lights off ;;
+  "Firmware default")      legion-lights auto ;;
+  *) exit 0 ;;
+esac
+notify "$choice"
