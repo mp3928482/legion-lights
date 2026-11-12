@@ -134,6 +134,37 @@ class UsbTests(unittest.TestCase):
         self.assertEqual(ll._ioc(3, 0, struct.calcsize("BBHHHI4xQ"), "U"), 0xC0185500)
 
 
+class ThemeTests(unittest.TestCase):
+    CFG = {"zones": dict(ll.DEFAULT_THEME_ZONES), "vivid": False}
+    ZONES = ["lower_fans", "front_strip", "top_fans", "rear_fan", "cpu_cooler", "extra"]
+
+    def test_accent_reused_as_blue_still_gives_distinct_zones(self):
+        # Tokyo Night: accent == blue, and magenta is only ~37 degrees of hue from it.
+        pal = {k: ll.parse_color(v) for k, v in {
+            "accent": "7aa2f7", "blue": "7aa2f7", "bright_blue": "7da6ff", "magenta": "ad8ee6",
+            "cyan": "449dab", "red": "f7768e", "green": "9ece6a", "yellow": "e0af68"}.items()}
+        got = ll.theme_zone_colors(self.ZONES, pal, self.CFG)
+        self.assertEqual(list(got), self.ZONES)
+        self.assertEqual(got["front_strip"], pal["accent"])
+        self.assertEqual(got["top_fans"], pal["magenta"])
+        self.assertEqual(got["lower_fans"], pal["green"])
+        self.assertEqual(got["extra"], pal["accent"])
+
+    def test_skips_a_colour_another_zone_already_has(self):
+        pal = {"accent": (255, 0, 0), "red": (250, 10, 10), "orange": (255, 140, 0)}
+        got = ll.theme_zone_colors(["front_strip", "cpu_cooler"], pal, self.CFG)
+        self.assertEqual(got["cpu_cooler"], (255, 140, 0))
+
+    def test_fixed_hex_in_config(self):
+        cfg = {"zones": {"rear_fan": ["#00ff00"]}, "vivid": False}
+        got = ll.theme_zone_colors(["rear_fan"], {"accent": (1, 2, 3)}, cfg)
+        self.assertEqual(got["rear_fan"], (0, 255, 0))
+
+    def test_vivid_keeps_hue_and_greys(self):
+        self.assertEqual(ll.vivid((0x7a, 0xa2, 0xf7)), (0x4a, 0x84, 0xff))
+        self.assertEqual(ll.vivid((128, 128, 128)), (128, 128, 128))
+
+
 class ColorTests(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(ll.parse_color("#ff8000"), (255, 128, 0))

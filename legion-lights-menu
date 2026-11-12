@@ -19,6 +19,7 @@ notify() { command -v notify-send >/dev/null && notify-send -a "Case lighting" "
 choice=$(printf '%s\n' \
   "Match theme" \
   "Match theme (breathe)" \
+  "Match theme (spin)" \
   "Solid color" \
   "Rainbow wave" \
   "Color cycle" \
@@ -35,6 +36,7 @@ pick_color() {
 case "$choice" in
   "Match theme")           legion-lights theme ;;
   "Match theme (breathe)") legion-lights theme --effect breathe ;;
+  "Match theme (spin)")    legion-lights theme --effect spin ;;
   "Solid color")           c=$(pick_color) && legion-lights color "$c" ;;
   "Rainbow wave")          legion-lights effect wave ;;
   "Color cycle")           legion-lights effect cycle ;;

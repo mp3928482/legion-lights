@@ -595,23 +595,115 @@ def stop_running_effect():
 # --- Omarchy theme ------------------------------------------------------------------------
 
 
-def omarchy_accent():
-    """Best-effort accent color from the current Omarchy theme."""
+def theme_dir():
     candidates = [Path(os.environ.get("XDG_STATE_HOME") or home_dir() / ".local/state") / "omarchy/current/theme",
                   home_dir() / ".config/omarchy/current/theme"]
-    theme = next((c for c in candidates if c.is_dir()), candidates[0])
-    probes = [
-        ("colors.toml", r'^\s*accent\s*=\s*["\']?#?([0-9a-fA-F]{6})'),
-        ("hyprland.conf", r'(?:activeBorderColor|col\.active_border)\s*=\s*rgba?\(\s*([0-9a-fA-F]{6})'),
-        ("alacritty.toml", r'^\s*blue\s*=\s*["\'](?:#|0x)([0-9a-fA-F]{6})'),
-    ]
-    for name, pattern in probes:
-        f = theme / name
-        if f.exists():
-            m = re.search(pattern, f.read_text(errors="ignore"), re.M)
+    return next((c for c in candidates if c.is_dir()), candidates[0])
+
+
+def theme_palette(theme=None):
+    """All `name = "#RRGGBB"` colours from the theme's colors.toml, plus a best-effort accent."""
+    theme = theme or theme_dir()
+    palette = {}
+    f = theme / "colors.toml"
+    if f.exists():
+        for m in re.finditer(r'^\s*([A-Za-z0-9_]+)\s*=\s*["\']?#?([0-9a-fA-F]{6})\b', f.read_text(errors="ignore"), re.M):
+            palette[m.group(1)] = parse_color(m.group(2))
+    if "accent" not in palette:
+        probes = [("hyprland.conf", r'(?:activeBorderColor|col\.active_border)\s*=\s*rgba?\(\s*([0-9a-fA-F]{6})'),
+                  ("alacritty.toml", r'^\s*blue\s*=\s*["\'](?:#|0x)([0-9a-fA-F]{6})')]
+        for name, pattern in probes:
+            g = theme / name
+            m = g.exists() and re.search(pattern, g.read_text(errors="ignore"), re.M)
             if m:
-                return parse_color(m.group(1))
-    sys.exit(f"Couldn't find an accent color in {theme}. Use `legion-lights color RRGGBB` instead.")
+                palette["accent"] = parse_color(m.group(1))
+                break
+    if "accent" not in palette:
+        sys.exit(f"Couldn't find theme colors in {theme}. Use `legion-lights color RRGGBB` instead.")
+    return palette
+
+
+def omarchy_accent():
+    return theme_palette()["accent"]
+
+
+# Which theme colour each zone uses in theme mode. Each zone takes the first colour in its list
+# that the theme defines and that isn't too close to a colour already given to another zone
+# (themes often reuse the accent as blue, etc.). Entries can also be fixed colours like "#ff0000".
+# Zones not listed here use the accent. Override in ~/.config/legion-lights/theme.json:
+#   {"zones": {"rear_fan": ["yellow", "orange"]}, "vivid": true}
+DEFAULT_THEME_ZONES = {
+    "front_strip": ["accent"],
+    "top_fans": ["magenta", "bright_magenta", "red"],
+    "rear_fan": ["cyan", "bright_cyan", "green"],
+    "cpu_cooler": ["red", "bright_red", "orange", "yellow"],
+    "lower_fans": ["green", "bright_green", "yellow", "blue"],
+}
+
+
+def load_theme_config():
+    cfg = {"zones": dict(DEFAULT_THEME_ZONES), "vivid": True}
+    f = config_dir() / "theme.json"
+    if f.exists():
+        user = json.loads(f.read_text())
+        cfg["zones"].update({k: ([v] if isinstance(v, str) else v) for k, v in user.get("zones", {}).items()})
+        cfg["vivid"] = user.get("vivid", True)
+    return cfg
+
+
+def vivid(rgb):
+    """Theme colours are tuned for screens; on LEDs pastels wash out to near-white and dark
+    colours look dim. Keep the hue, raise saturation and brightness. Greys stay grey."""
+    h, s, v = colorsys.rgb_to_hsv(*(c / 255 for c in rgb))
+    if s < 0.12:
+        return rgb
+    return hsv(h, min(1.0, s ** 0.5), 1.0)
+
+
+def _too_close(a, b):
+    """Would these read as the same colour on an LED? Compare hue (what survives vivid());
+    greys only clash with greys."""
+    ha, sa, _ = colorsys.rgb_to_hsv(*(c / 255 for c in a))
+    hb, sb, _ = colorsys.rgb_to_hsv(*(c / 255 for c in b))
+    if sa < 0.12 or sb < 0.12:
+        return sa < 0.12 and sb < 0.12
+    d = abs(ha - hb) % 1.0
+    return min(d, 1 - d) < 25 / 360
+
+
+def theme_zone_colors(zones, palette, cfg):
+    """{zone: rgb}: each zone's colour from the theme, kept distinct where the theme allows."""
+    out, used = {}, []
+    # Zones listed in the config pick first, in that order (so the strip gets the accent).
+    order = [z for z in cfg["zones"] if z in zones] + [z for z in zones if z not in cfg["zones"]]
+    for zone in order:
+        prefs = cfg["zones"].get(zone, ["accent"])
+        options = []
+        for p in prefs:
+            if p in palette:
+                options.append(palette[p])
+            elif re.fullmatch(r"#?[0-9a-fA-F]{6}", p):
+                options.append(parse_color(p))
+        if not options:
+            options = [palette["accent"]]
+        pick = next((c for c in options if not any(_too_close(c, u) for u in used)), options[0])
+        used.append(pick)
+        out[zone] = vivid(pick) if cfg["vivid"] else pick
+    return {z: out[z] for z in zones}
+
+
+def theme_lamp_colors(dev):
+    """{lamp: rgb} for theme mode, plus the per-zone choice for display."""
+    zones = load_zones(dev.lamp_count)
+    per_zone = theme_zone_colors(list(zones), theme_palette(), load_theme_config())
+    lamps = {}
+    for zone, ids in zones.items():
+        for i in ids:
+            lamps.setdefault(i, per_zone[zone])
+    accent = per_zone.get("front_strip") or vivid(theme_palette()["accent"])
+    for i in range(dev.lamp_count):
+        lamps.setdefault(i, accent)
+    return lamps, per_zone
 
 
 # --- Effects -------------------------------------------------------------------------------
@@ -657,8 +749,9 @@ def run_effect(dev, name, color, brightness, speed, lamps):
             t = (time.monotonic() - t0) * speed
             frame = {}
             for i in lamps:
+                base = color[i] if isinstance(color, dict) else color
                 if name == "breathe":
-                    c = scale(color, brightness * (0.08 + 0.92 * (0.5 - 0.5 * math.cos(t * 2 * math.pi / 4))))
+                    c = scale(base, brightness * (0.08 + 0.92 * (0.5 - 0.5 * math.cos(t * 2 * math.pi / 4))))
                 elif name == "cycle":
                     c = scale(hsv(t / 12), brightness)
                 elif name == "wave":
@@ -678,7 +771,7 @@ def run_effect(dev, name, color, brightness, speed, lamps):
                     level = 0.6 ** s if s < 4 else 0.0
                     # Gamma: LEDs are linear in PWM but the eye isn't, so without this a half-way
                     # cross-fade looks like two full lamps and the head seems to stall.
-                    c = scale(color, brightness * (0.02 + 0.98 * level ** 2.2))
+                    c = scale(base, brightness * (0.02 + 0.98 * level ** 2.2))
                 else:
                     raise ValueError(name)
                 frame[i] = c
@@ -703,21 +796,27 @@ def apply_state(dev, state, args_device=None):
     mode = state.get("mode")
     if mode == "auto":
         dev.set_autonomous(True)
-    elif mode in ("color", "theme") and not state.get("effect"):
-        color = omarchy_accent() if mode == "theme" else tuple(state["color"])
+    elif mode == "theme" and not state.get("effect"):
+        colors, _ = theme_lamp_colors(dev)
+        dev.set_autonomous(False)
+        dev.set_lamps({i: scale(c, state.get("brightness", 1.0)) for i, c in colors.items()})
+    elif mode == "color" and not state.get("effect"):
+        color = tuple(state["color"])
         dev.set_autonomous(False)
         lamps = resolve_lamps(dev, state.get("lamps"))
         dev.set_lamps({i: scale(color, state.get("brightness", 1.0)) for i in lamps})
     elif state.get("effect"):
-        color = omarchy_accent() if mode == "theme" else tuple(state.get("color", (255, 255, 255)))
+        color = tuple(state.get("color", (255, 255, 255)))
         launch_detached(state["effect"], color, state.get("brightness", 1.0), state.get("speed", 1.0),
-                        state.get("lamps"), args_device)
+                        state.get("lamps"), args_device, theme=(mode == "theme"))
 
 
-def launch_detached(effect, color, brightness, speed, lamps, device):
+def launch_detached(effect, color, brightness, speed, lamps, device, theme=False):
     cmd = [sys.executable, os.path.abspath(__file__), "effect", effect, "--foreground",
            "--color", "%02x%02x%02x" % tuple(color), "--brightness", str(round(brightness * 100)),
            "--speed", str(speed), "--no-save"]
+    if theme:
+        cmd.append("--theme")
     if lamps:
         cmd += ["--lamps", lamps]
     if device:
@@ -811,13 +910,17 @@ def cmd_effect(args):
     stop_running_effect()
     state = {"mode": "color", "effect": args.name, "color": list(args.color),
              "brightness": args.brightness / 100, "speed": args.speed, "lamps": args.lamps}
+    if args.theme:
+        state["mode"] = "theme"
     if not args.no_save:
         save_state(state)
     if not args.foreground:
-        launch_detached(args.name, args.color, args.brightness / 100, args.speed, args.lamps, args.device)
+        launch_detached(args.name, args.color, args.brightness / 100, args.speed, args.lamps, args.device,
+                        theme=args.theme)
         return
     dev = open_device(args.device)
-    run_effect(dev, args.name, args.color, args.brightness / 100, args.speed, resolve_lamps(dev, args.lamps))
+    color = theme_lamp_colors(dev)[0] if args.theme else args.color
+    run_effect(dev, args.name, color, args.brightness / 100, args.speed, resolve_lamps(dev, args.lamps))
 
 
 def cmd_theme(args):
@@ -832,6 +935,9 @@ def cmd_theme(args):
     save_state(state)
     dev = open_device(args.device)
     apply_state(dev, state, args.device)
+    if not args.if_following:
+        for zone, c in theme_lamp_colors(dev)[1].items():
+            print(f"  {zone:12s} #{bytes(c).hex()}")
 
 
 def cmd_restore(args):
@@ -895,12 +1001,13 @@ def build_parser():
     sp.add_argument("-b", "--brightness", type=int, default=100)
     sp.add_argument("-s", "--speed", type=float, default=1.0)
     lamps_arg(sp)
+    sp.add_argument("--theme", action="store_true", help="use the per-zone theme colors (as `theme` mode does)")
     sp.add_argument("--foreground", action="store_true")
     sp.add_argument("--no-save", action="store_true")
     sp.set_defaults(func=cmd_effect)
 
-    sp = sub.add_parser("theme", help="follow the current Omarchy theme's accent color")
-    sp.add_argument("--effect", choices=["breathe", "spin"], help="animate the accent color")
+    sp = sub.add_parser("theme", help="color each zone from the current Omarchy theme, and follow theme changes")
+    sp.add_argument("--effect", choices=["breathe", "spin"], help="animate the theme colors")
     sp.add_argument("-b", "--brightness", type=int, default=100)
     sp.add_argument("--if-following", action="store_true",
                     help="only act if the saved state is theme mode (for the theme-set hook)")

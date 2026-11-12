@@ -34,8 +34,8 @@ legion-lights color ff6000 -b 40 --lamps front_strip
 legion-lights effect wave              # rainbow rotating round each fan, phase-shifted across the case
 legion-lights effect breathe -c cyan
 legion-lights effect spin -c red       # comet with a tail chasing round each fan ring
-legion-lights theme                    # match the Omarchy theme accent, and follow theme changes
-legion-lights theme --effect breathe
+legion-lights theme                    # each zone in a different theme color; follows theme changes
+legion-lights theme --effect spin      # same colors, animated (breathe or spin)
 legion-lights off
 legion-lights auto                     # hand back to firmware: on the T5 this goes DARK (see below)
 legion-lights-menu                     # Walker menu with all of the above
@@ -63,6 +63,31 @@ Checked on a Legion T5 30AGB10 by lighting each zone on its own:
 
 ```json
 { "fans": [0, 11], "strip": [12, 27], "top": [28, 39], "rear": [40, 51], "cooler": [52, 63] }
+```
+
+## Theme colors
+
+`legion-lights theme` gives each zone its own color from the current Omarchy theme's `colors.toml`.
+It updates when you switch themes (through the `theme-set` hook). Each zone takes the first entry
+in its list that the theme defines and whose hue isn't within 25° of a zone that has already picked.
+Themes often reuse the accent as `blue`, for example.
+
+| Zone | Tries, in order |
+|---|---|
+| `front_strip` | accent |
+| `top_fans` | magenta, bright_magenta, red |
+| `rear_fan` | cyan, bright_cyan, green |
+| `cpu_cooler` | red, bright_red, orange, yellow |
+| `lower_fans` | green, bright_green, yellow, blue |
+| anything else | accent |
+
+Theme colors are tuned for screens and wash out to near-white on LEDs. By default they're made
+*vivid*: same hue, more saturation, full brightness (greys stay grey). To change the mapping or
+turn that off, create `~/.config/legion-lights/theme.json`. Its zone lists replace the defaults one
+zone at a time, and entries can be theme color names or fixed `#RRGGBB` values:
+
+```json
+{ "zones": { "rear_fan": ["yellow", "orange"], "cpu_cooler": ["#ffffff"] }, "vivid": true }
 ```
 
 ## Protocol notes
