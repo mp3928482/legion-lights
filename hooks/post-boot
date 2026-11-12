@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Omarchy runs ~/.config/omarchy/hooks/post-boot.d/* once the session has started.
+# The controller comes up dark, so put back whatever the lights were last set to.
+legion-lights restore

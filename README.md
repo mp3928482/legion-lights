@@ -3,8 +3,15 @@
 Case lighting control for the Lenovo Legion T5 (30AGB10) on Omarchy / Arch Linux.
 
 The case controller (USB `17EF:C955`, interface 1) is a standard **HID LampArray**:
-70 RGB lamps, at most one update every 21 ms. This tool sends it feature reports through
-`/dev/hidrawN`. It needs Python 3 only, with no extra packages and no kernel driver.
+70 RGB lamps, at most one update every 21 ms. It needs Python 3 only, with no extra packages and
+no kernel driver.
+
+**Why not hidraw:** the LampArray interface has no interrupt endpoint (it only uses feature reports).
+Windows is fine with that, but Linux's `usbhid` refuses to bind it (`couldn't find an input interrupt
+endpoint`), so there is no `/dev/hidrawN` for it. legion-lights sends the HID GET/SET_REPORT requests
+itself as USB control transfers through `/dev/bus/usb/BBB/DDD`. Interface 0 (vendor page 0xFF89,
+the one OpenRGB uses) is left alone. If a future kernel does bind the interface, the hidraw path is
+used instead.
 
 ## Install
 
@@ -13,8 +20,9 @@ The case controller (USB `17EF:C955`, interface 1) is a standard **HID LampArray
 ```
 
 The installer adds the command and the Walker menu to `/usr/local/bin`. It also adds a udev rule
-(so you don't need sudo), a suspend/resume hook, an Omarchy `theme-set` hook, and a line in Hyprland
-autostart that restores your lights at login.
+(so you don't need sudo), a suspend/resume hook, and two Omarchy hooks:
+`~/.config/omarchy/hooks/theme-set.d/legion-lights` (follow theme changes) and
+`~/.config/omarchy/hooks/post-boot.d/legion-lights` (restore your lights at login).
 
 ## Use
 
@@ -23,9 +31,9 @@ legion-lights info                     # controller attributes + report layout
 legion-lights identify                 # light each zone in turn to learn which is which
 legion-lights color purple             # solid color (names, RRGGBB or #RRGGBB)
 legion-lights color ff6000 -b 40 --lamps bar
-legion-lights effect wave              # rainbow across the case, using real lamp positions
+legion-lights effect wave              # rainbow rotating round each fan, phase-shifted across the case
 legion-lights effect breathe -c cyan
-legion-lights effect spin -c red       # rotating highlight on each fan ring
+legion-lights effect spin -c red       # comet with a tail chasing round each fan ring
 legion-lights theme                    # match the Omarchy theme accent, and follow theme changes
 legion-lights theme --effect breathe
 legion-lights off
@@ -34,7 +42,8 @@ legion-lights-menu                     # Walker menu with all of the above
 ```
 
 Effects run in the background as a transient systemd user unit. Any new command stops the
-running effect.
+running effect. Each frame sends only the lamps whose color changed: re-sending unchanged lamps
+makes the controller hitch, which shows up as uneven motion.
 
 ## Zones
 
@@ -64,7 +73,19 @@ nothing on its own. So on Linux, the lights are whatever this tool last sent. `o
 the useful commands; `auto` is mostly for handing the device to other software.
 
 The tool reads these IDs from the report descriptor, so it doesn't depend on the numbers above.
-This layout was checked against the real controller from Windows.
+The controller declares the LampArrayAttributes fields as *Constant*, so the parser treats only
+usage-less fields as padding. The layout was checked from Windows and on Linux against the real
+controller; `tests/legion_t5_if1_descriptor.bin` is the descriptor it returns.
+
+Each control transfer takes about 4 ms (full-speed USB), so a full 70-lamp frame
+(9 multi-updates) takes about 32 ms, about 30 fps.
+
+## OpenRGB
+
+OpenRGB drives this controller's *other* interface (0, vendor protocol) and only reaches some of
+the zones. Once legion-lights has taken host control of the LampArray, the LampArray wins: tested
+on a T5, vendor-protocol writes to interface 0 then have no visible effect. So if you switch to
+legion-lights, drop the case part of any OpenRGB theme hook. Keyboard control is unaffected.
 
 ## Tests
 

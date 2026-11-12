@@ -17,6 +17,7 @@ import math
 import os
 import re
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -192,9 +193,10 @@ def parse_feature_reports(desc):
                 rep = reports.get(rid)
                 if rep is None:
                     rep = reports[rid] = Report(rid, collections[-1] if collections else 0)
-                is_constant = value & 1
+                # LampArray declares its read-only attributes as Constant fields, so only
+                # fields without any usage are treated as padding.
                 for k in range(glob_state["count"]):
-                    if not is_constant and usages:
+                    if usages:
                         rep.fields.append(Field(usages[min(k, len(usages) - 1)], rep.bits, glob_state["size"]))
                     rep.bits += glob_state["size"]
             usages, usage_min = [], None
@@ -204,8 +206,8 @@ def parse_feature_reports(desc):
 # --- Device access --------------------------------------------------------------------
 
 
-def _ioc(direction, nr, size):
-    return (direction << 30) | (size << 16) | (ord("H") << 8) | nr
+def _ioc(direction, nr, size, kind="H"):
+    return (direction << 30) | (size << 16) | (ord(kind) << 8) | nr
 
 
 def HIDIOCSFEATURE(size):
@@ -216,8 +218,94 @@ def HIDIOCGFEATURE(size):
     return _ioc(3, 0x07, size)
 
 
-def find_lamp_arrays():
-    """Yield (dev_path, vid, pid, reports) for every hidraw node that is a LampArray."""
+class HidrawTransport:
+    """Feature reports through /dev/hidrawN (when the kernel's usbhid driver binds the interface)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.fd = os.open(path, os.O_RDWR)
+
+    def set_feature(self, data):
+        import fcntl
+        fcntl.ioctl(self.fd, HIDIOCSFEATURE(len(data)), data)
+
+    def get_feature(self, buf):
+        import fcntl
+        fcntl.ioctl(self.fd, HIDIOCGFEATURE(len(buf)), buf, True)
+
+    def close(self):
+        os.close(self.fd)
+
+
+class UsbTransport:
+    """Feature reports as HID class control transfers through /dev/bus/usb/BBB/DDD.
+
+    The Legion T5 LampArray interface has no interrupt endpoint (feature reports only).
+    Windows accepts that, but Linux usbhid refuses to bind it ("couldn't find an input
+    interrupt endpoint"), so there is no hidraw node. The interface stays unclaimed and
+    usbfs lets us talk to it directly; the kernel claims it for this fd on first use.
+    """
+
+    GET_REPORT, SET_REPORT, FEATURE = 0x01, 0x09, 3
+
+    def __init__(self, path, interface):
+        import ctypes
+        self.path, self.interface = path, interface
+        self.fd = os.open(path, os.O_RDWR)
+        self._ctypes = ctypes
+        # struct usbdevfs_ctrltransfer { u8 bRequestType, bRequest; u16 wValue, wIndex, wLength;
+        #                                u32 timeout; void *data; }
+        self._fmt = "BBHHHI" + ("4xQ" if ctypes.sizeof(ctypes.c_void_p) == 8 else "I")
+        self._ioctl = _ioc(3, 0, struct.calcsize(self._fmt), "U")  # USBDEVFS_CONTROL
+
+    def control(self, request_type, request, value, length_or_data, timeout_ms=1000):
+        import fcntl
+        ct = self._ctypes
+        if isinstance(length_or_data, int):
+            buf = ct.create_string_buffer(length_or_data)
+        else:
+            buf = ct.create_string_buffer(bytes(length_or_data), len(length_or_data))
+        hdr = struct.pack(self._fmt, request_type, request, value, self.interface,
+                          len(buf), timeout_ms, ct.addressof(buf))
+        n = fcntl.ioctl(self.fd, self._ioctl, bytearray(hdr))
+        return buf.raw[:n] if isinstance(n, int) and n >= 0 else buf.raw
+
+    def report_descriptor(self, length):
+        # Standard GET_DESCRIPTOR(HID Report) addressed to the interface
+        return self.control(0x81, 0x06, 0x2200, length)
+
+    def set_feature(self, data):
+        self.control(0x21, self.SET_REPORT, (self.FEATURE << 8) | data[0], data)
+
+    def get_feature(self, buf):
+        got = self.control(0xA1, self.GET_REPORT, (self.FEATURE << 8) | buf[0], len(buf))
+        buf[:len(got)] = got
+
+    def close(self):
+        os.close(self.fd)
+
+
+def _usb_hid_interfaces(dev_dir):
+    """Yield (interface_number, report_descriptor_length) for each HID interface of a USB
+    device, read from its cached configuration descriptor in sysfs."""
+    try:
+        d = Path(dev_dir, "descriptors").read_bytes()
+    except OSError:
+        return
+    i, iface = 0, None
+    while i + 1 < len(d) and d[i] >= 2:
+        length, dtype = d[i], d[i + 1]
+        if dtype == 0x04 and length >= 9:
+            iface = d[i + 2] if d[i + 5] == 0x03 else None
+        elif dtype == 0x21 and iface is not None and length >= 9:
+            for k in range(d[i + 5]):  # bNumDescriptors
+                o = i + 6 + 3 * k
+                if o + 2 < i + length and d[o] == 0x22:
+                    yield iface, d[o + 1] | (d[o + 2] << 8)
+        i += length
+
+
+def _hidraw_lamp_arrays():
     for node in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
         try:
             desc = Path(node, "device", "report_descriptor").read_bytes()
@@ -229,11 +317,58 @@ def find_lamp_arrays():
             continue
         m = re.search(r"HID_ID=\w+:([0-9A-Fa-f]+):([0-9A-Fa-f]+)", uevent)
         vid, pid = (int(m.group(1), 16), int(m.group(2), 16)) if m else (0, 0)
-        yield "/dev/" + os.path.basename(node), vid, pid, reports
+        path = "/dev/" + os.path.basename(node)
+        yield path, vid, pid, reports, lambda p=path: HidrawTransport(p)
+
+
+def _usb_lamp_arrays():
+    """LampArray interfaces that no kernel driver has bound (so they have no hidraw node)."""
+    for dev_dir in sorted(glob.glob("/sys/bus/usb/devices/*")):
+        if ":" in os.path.basename(dev_dir) or not Path(dev_dir, "idVendor").exists():
+            continue
+        hid = list(_usb_hid_interfaces(dev_dir))
+        if not hid:
+            continue
+        try:
+            vid = int(Path(dev_dir, "idVendor").read_text(), 16)
+            pid = int(Path(dev_dir, "idProduct").read_text(), 16)
+            bus = int(Path(dev_dir, "busnum").read_text())
+            num = int(Path(dev_dir, "devnum").read_text())
+            cfg = Path(dev_dir, "bConfigurationValue").read_text().strip() or "1"
+        except (OSError, ValueError):
+            continue
+        path = f"/dev/bus/usb/{bus:03d}/{num:03d}"
+        for iface, desc_len in hid:
+            if Path(f"{dev_dir}:{cfg}.{iface}", "driver").exists():
+                continue  # bound interfaces show up as hidraw instead
+            opener = lambda p=path, n=iface: UsbTransport(p, n)
+            try:
+                t = opener()
+            except OSError:
+                if (vid, pid) == (PREFERRED_VID, PREFERRED_PID):
+                    yield f"{path}:{iface}", vid, pid, None, opener
+                continue
+            try:
+                reports = parse_feature_reports(t.report_descriptor(desc_len))
+            except OSError:
+                continue
+            finally:
+                t.close()
+            if any(r.kind == ATTRIBUTES_REPORT for r in reports.values()):
+                yield f"{path}:{iface}", vid, pid, reports, opener
+
+
+def find_lamp_arrays():
+    """Yield (name, vid, pid, reports, open_transport) for every LampArray device.
+
+    reports is None when the device was found but could not be opened (permissions).
+    """
+    yield from _hidraw_lamp_arrays()
+    yield from _usb_lamp_arrays()
 
 
 class LampArray:
-    def __init__(self, path, reports):
+    def __init__(self, path, reports, transport):
         self.path = path
         self.by_kind = {r.kind: r for r in reports.values() if r.fields}
         needed = [ATTRIBUTES_REPORT, ATTR_REQUEST_REPORT, ATTR_RESPONSE_REPORT,
@@ -241,11 +376,7 @@ class LampArray:
         missing = [hex(k & 0xFFFF) for k in needed if k not in self.by_kind]
         if missing:
             raise RuntimeError(f"{path}: LampArray descriptor is missing reports {missing}")
-        try:
-            self.fd = os.open(path, os.O_RDWR)
-        except PermissionError:
-            sys.exit(f"No permission to open {path}. Install the udev rule "
-                     "(70-legion-lights.rules) and replug/reboot, or run with sudo.")
+        self.io = transport
         a = self._get(ATTRIBUTES_REPORT)
         self.lamp_count = a[LAMP_COUNT][0]
         self.kind = a.get(LAMP_ARRAY_KIND, [0])[0]
@@ -254,19 +385,16 @@ class LampArray:
         self.lamps_per_update = self.by_kind[MULTI_UPDATE_REPORT].count(LAMP_ID)
 
     def close(self):
-        os.close(self.fd)
+        self.io.close()
 
     def _set(self, kind, values):
-        import fcntl
-        data = self.by_kind[kind].encode(values)
-        fcntl.ioctl(self.fd, HIDIOCSFEATURE(len(data)), data)
+        self.io.set_feature(self.by_kind[kind].encode(values))
 
     def _get(self, kind):
-        import fcntl
         rep = self.by_kind[kind]
         buf = bytearray(rep.size)
         buf[0] = rep.id
-        fcntl.ioctl(self.fd, HIDIOCGFEATURE(len(buf)), buf, True)
+        self.io.get_feature(buf)
         return rep.decode(buf)
 
     def set_autonomous(self, on):
@@ -317,7 +445,7 @@ def open_device(path=None):
     found = list(find_lamp_arrays())
     if not found:
         sys.exit("No HID LampArray device found. Is the Legion lighting controller (17EF:C955) connected? "
-                 "Check `ls /sys/class/hidraw` and `lsusb | grep 17ef`.")
+                 "Check `grep -l c955 /sys/bus/usb/devices/*/idProduct`.")
     if path:
         match = [f for f in found if f[0] == path]
         if not match:
@@ -326,7 +454,16 @@ def open_device(path=None):
     else:
         preferred = [f for f in found if (f[1], f[2]) == (PREFERRED_VID, PREFERRED_PID)]
         dev = (preferred or found)[0]
-    return LampArray(dev[0], dev[3])
+    name, _, _, reports, opener = dev
+    try:
+        transport = opener()
+    except PermissionError:
+        sys.exit(f"No permission to open {name}. Install the udev rule "
+                 "(70-legion-lights.rules) and replug/reboot, or run with sudo.")
+    if reports is None:
+        transport.close()
+        sys.exit(f"Couldn't read the report descriptor of {name}.")
+    return LampArray(name, reports, transport)
 
 
 # --- Colors, zones, state --------------------------------------------------------------
@@ -405,6 +542,25 @@ def resolve_lamps(dev, spec):
     return sorted({i for i in ids if 0 <= i < dev.lamp_count})
 
 
+def runtime_dir():
+    """Per-boot directory for the effect pidfile, so a stale PID never outlives a reboot."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    if not os.path.isdir(base):
+        return state_dir()
+    d = Path(base) / "legion-lights"
+    d.mkdir(exist_ok=True)
+    return d
+
+
+def _pid_is_effect(pid):
+    """True if pid is a legion-lights effect process (guards against PID reuse)."""
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    return b"effect" in cmd and b"--foreground" in cmd and any(b"legion" in c for c in cmd)
+
+
 def save_state(state):
     (state_dir() / "state.json").write_text(json.dumps(state))
 
@@ -417,12 +573,12 @@ def load_state():
 
 
 def stop_running_effect():
-    pidfile = state_dir() / "effect.pid"
+    pidfile = runtime_dir() / "effect.pid"
     try:
         pid = int(pidfile.read_text())
     except (OSError, ValueError):
         return
-    if pid != os.getpid():
+    if pid != os.getpid() and _pid_is_effect(pid):
         try:
             os.kill(pid, signal.SIGTERM)
             for _ in range(50):
@@ -440,7 +596,9 @@ def stop_running_effect():
 
 def omarchy_accent():
     """Best-effort accent color from the current Omarchy theme."""
-    theme = home_dir() / ".config/omarchy/current/theme"
+    candidates = [Path(os.environ.get("XDG_STATE_HOME") or home_dir() / ".local/state") / "omarchy/current/theme",
+                  home_dir() / ".config/omarchy/current/theme"]
+    theme = next((c for c in candidates if c.is_dir()), candidates[0])
     probes = [
         ("colors.toml", r'^\s*accent\s*=\s*["\']?#?([0-9a-fA-F]{6})'),
         ("hyprland.conf", r'(?:activeBorderColor|col\.active_border)\s*=\s*rgba?\(\s*([0-9a-fA-F]{6})'),
@@ -472,7 +630,7 @@ def hsv(h, s=1.0, v=1.0):
 
 
 def run_effect(dev, name, color, brightness, speed, lamps):
-    pidfile = state_dir() / "effect.pid"
+    pidfile = runtime_dir() / "effect.pid"
     pidfile.write_text(str(os.getpid()))
     running = True
 
@@ -492,6 +650,7 @@ def run_effect(dev, name, color, brightness, speed, lamps):
     interval = max(dev.min_interval, 1 / 40)
     t0 = time.monotonic()
     dev.set_autonomous(False)
+    last = {}
     try:
         while running:
             t = (time.monotonic() - t0) * speed
@@ -502,17 +661,34 @@ def run_effect(dev, name, color, brightness, speed, lamps):
                 elif name == "cycle":
                     c = scale(hsv(t / 12), brightness)
                 elif name == "wave":
+                    # A full rainbow around each fan ring / along each strip, rotating, with each
+                    # part phase-shifted by where it sits in the case. (Colouring by position alone
+                    # makes every fan one blob: its 12 lamps are only a few cm apart.)
                     x, y = pos[i]
-                    c = scale(hsv(t / 6 + (x + y) / 2), brightness)
-                elif name == "spin":
                     k, n = index_in_zone.get(i, (0, 1))
-                    d = (k / n - t / 2) % 1.0
-                    c = scale(color, brightness * (0.05 + 0.95 * max(0.0, 1 - d * 3)))
+                    c = scale(hsv(t / 4 + k / n + (x + y) / 4), brightness)
+                elif name == "spin":
+                    # Comet that steps one lamp at a time at an even rate, with a stepped tail.
+                    # (Cross-fading between lamps looked uneven on the Legion fans in testing;
+                    # whole-lamp steps read as steady motion.)
+                    k, n = index_in_zone.get(i, (0, 1))
+                    head = int((t / 2 % 1.0) * n)
+                    s = (head - k) % n          # lamps behind the head
+                    level = 0.6 ** s if s < 4 else 0.0
+                    # Gamma: LEDs are linear in PWM but the eye isn't, so without this a half-way
+                    # cross-fade looks like two full lamps and the head seems to stall.
+                    c = scale(color, brightness * (0.02 + 0.98 * level ** 2.2))
                 else:
                     raise ValueError(name)
                 frame[i] = c
             start = time.monotonic()
-            dev.frame(frame)
+            # Only send lamps whose colour changed since the last frame.
+            changed = {i: c for i, c in frame.items() if last.get(i) != c}
+            if len(changed) == len(frame):
+                dev.frame(frame)
+            elif changed:
+                dev.set_lamps(changed)
+            last.update(changed)
             time.sleep(max(0.0, interval - (time.monotonic() - start)))
     finally:
         pidfile.unlink(missing_ok=True)
@@ -561,7 +737,7 @@ def launch_detached(effect, color, brightness, speed, lamps, device):
 
 
 def cmd_list(args):
-    for path, vid, pid, reports in find_lamp_arrays():
+    for path, vid, pid, reports, _ in find_lamp_arrays():
         tag = "  <- Legion case lighting" if (vid, pid) == (PREFERRED_VID, PREFERRED_PID) else ""
         print(f"{path}  {vid:04x}:{pid:04x}{tag}")
 
@@ -686,7 +862,7 @@ def cmd_identify(args):
 
 def build_parser():
     p = argparse.ArgumentParser(prog="legion-lights", description=__doc__.split("\n")[0])
-    p.add_argument("--device", help="hidraw path (default: auto-detect)")
+    p.add_argument("--device", help="device as printed by `list`, e.g. /dev/bus/usb/001/003:1 (default: auto-detect)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def lamps_arg(sp):

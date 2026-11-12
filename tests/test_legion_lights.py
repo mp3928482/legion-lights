@@ -91,6 +91,49 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(ll.HIDIOCGFEATURE(51), 0xC0334807)
 
 
+class RealDescriptorTests(unittest.TestCase):
+    """The report descriptor read from a real Legion T5 controller (17EF:C955, interface 1)."""
+
+    def setUp(self):
+        desc = (Path(__file__).parent / "legion_t5_if1_descriptor.bin").read_bytes()
+        self.by_kind = {r.kind: r for r in ll.parse_feature_reports(desc).values()}
+
+    def test_report_layout(self):
+        expect = {ll.ATTRIBUTES_REPORT: (1, 23), ll.ATTR_REQUEST_REPORT: (2, 3),
+                  ll.ATTR_RESPONSE_REPORT: (3, 29), ll.MULTI_UPDATE_REPORT: (4, 51),
+                  ll.RANGE_UPDATE_REPORT: (5, 10), ll.CONTROL_REPORT: (6, 2)}
+        for kind, (rid, size) in expect.items():
+            self.assertEqual((self.by_kind[kind].id, self.by_kind[kind].size), (rid, size), hex(kind))
+
+    def test_constant_attribute_fields_are_kept(self):
+        # The controller declares its attributes as Constant; they must not be parsed as padding.
+        raw = bytes.fromhex("01 46 00 80 1a 06 00 80 1a 06 00 40 0d 03 00 07 00 00 00 08 52 00 00")
+        got = self.by_kind[ll.ATTRIBUTES_REPORT].decode(raw)
+        self.assertEqual(got[ll.LAMP_COUNT], [70])
+        self.assertEqual(got[ll.LAMP_ARRAY_KIND], [7])
+        self.assertEqual(got[ll.MIN_UPDATE_US], [21000])
+        self.assertEqual((got[ll.BBOX_W], got[ll.BBOX_H], got[ll.BBOX_D]), ([400000], [400000], [200000]))
+
+
+class UsbTests(unittest.TestCase):
+    def test_hid_interfaces_from_config_descriptor(self):
+        import tempfile
+        # Device + config + iface 0 (HID, 46-byte report desc, 1 endpoint) + iface 1 (HID, 327 bytes, no endpoints)
+        raw = bytes.fromhex(
+            "12010002000000 40ef1755c90019010200 01"
+            "0902340002010 0e032".replace(" ", "")
+            + "090400000103010000" "092110010001222e00" "0705810340 0001".replace(" ", "")
+            + "090401000003000000" "092110010001224701")
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "descriptors").write_bytes(raw)
+            self.assertEqual(list(ll._usb_hid_interfaces(d)), [(0, 46), (1, 327)])
+
+    def test_usbdevfs_control_ioctl_number(self):
+        # USBDEVFS_CONTROL = _IOWR('U', 0, struct usbdevfs_ctrltransfer) = 0xC0185500 on 64-bit
+        import struct
+        self.assertEqual(ll._ioc(3, 0, struct.calcsize("BBHHHI4xQ"), "U"), 0xC0185500)
+
+
 class ColorTests(unittest.TestCase):
     def test_parse(self):
         self.assertEqual(ll.parse_color("#ff8000"), (255, 128, 0))

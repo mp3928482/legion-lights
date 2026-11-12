@@ -1,3 +1,6 @@
-# Let the logged-in user open the Lenovo Legion case lighting controller (HID LampArray)
-# without root. Installed to /etc/udev/rules.d/ by install.sh.
+# Let the logged-in user drive the Lenovo Legion case lighting controller without root.
+# The LampArray interface has no hidraw node on Linux, so legion-lights talks to the USB
+# device node (/dev/bus/usb/...) directly; the hidraw line covers kernels that do bind it.
+# Installed to /etc/udev/rules.d/ by install.sh.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="c955", TAG+="uaccess"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="c955", TAG+="uaccess"

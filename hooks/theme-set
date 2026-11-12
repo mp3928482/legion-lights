@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Omarchy runs ~/.config/omarchy/hooks/theme-set after you switch themes.
+# Omarchy runs ~/.config/omarchy/hooks/theme-set.d/* after you switch themes.
 # If the case lights are in "Match theme" mode, re-read the accent color.
-# If you already have a theme-set hook, add this line to it instead of replacing it.
 legion-lights theme --if-following
