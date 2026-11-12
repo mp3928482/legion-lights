@@ -526,7 +526,7 @@ def load_zones(lamp_count):
 
 
 def resolve_lamps(dev, spec):
-    """spec: None (all), zone names and/or ranges like 'ring1,bar,64-69'."""
+    """spec: None (all), zone names and/or ranges like 'top_fans,front_strip,0-11'."""
     if not spec:
         return list(range(dev.lamp_count))
     zones = load_zones(dev.lamp_count)
